@@ -28,10 +28,10 @@ jobs:
 
       - name: Generate review
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          claude-review --pr "${{ github.event.pull_request.html_url }}" --output review.md
+          claude-review --pr "${{ github.event.pull_request.html_url }}" --model "${{ vars.CLAUDE_REVIEW_MODEL || 'Nova' }}" --api-base "${{ vars.CLAUDE_REVIEW_API_BASE || 'https://api.openai.com/v1' }}" --output review.md
 
       - name: Post review comment
         uses: actions/github-script@v7
