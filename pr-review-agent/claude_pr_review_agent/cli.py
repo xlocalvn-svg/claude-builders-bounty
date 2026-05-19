@@ -9,7 +9,7 @@ import requests
 
 
 MAX_DIFF_CHARS = 60000
-DEFAULT_MODEL = "claude-3-5-sonnet-20241022"
+DEFAULT_MODEL = "Nova"
 
 
 @dataclass
@@ -125,9 +125,24 @@ def review_pr(pr: PullRequest, model: str, api_base: str, api_key: str) -> str:
         "max_tokens": 1800,
         "temperature": 0.2,
     }
-    response = requests.post(f"{api_base}/chat/completions", headers=headers, json=payload, timeout=120)
-    response.raise_for_status()
-    data = response.json()
+    
+    url = f"{api_base.rstrip('/')}/chat/completions"
+    response = requests.post(url, headers=headers, json=payload, timeout=120)
+    
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as e:
+        print(f"HTTP error: {e}", file=sys.stderr)
+        print(f"Response text: {response.text[:500]}", file=sys.stderr)
+        raise
+    
+    try:
+        data = response.json()
+    except Exception as e:
+        print(f"JSON decode error: {e}", file=sys.stderr)
+        print(f"Response text: {response.text[:500]}", file=sys.stderr)
+        raise
+    
     return data["choices"][0]["message"]["content"].strip()
 
 
@@ -153,6 +168,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(review)
         return 0
     except Exception as exc:
+        import traceback
+        traceback.print_exc()
         print(f"claude-review error: {exc}", file=sys.stderr)
         return 1
 
