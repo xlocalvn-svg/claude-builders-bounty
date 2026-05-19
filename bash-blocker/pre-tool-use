@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""
+Claude Code pre-tool-use hook that blocks destructive bash commands.
+
+The hook reads Claude Code hook JSON from stdin, checks Bash commands for
+high-risk destructive patterns, logs blocked attempts, and exits non-zero to
+prevent execution.
+"""
+
+import json
+import re
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+LOG_FILE = Path.home() / ".claude" / "hooks" / "blocked.log"
+BASH_TOOL_NAMES = {"bash", "shell", "exec", "terminal", "Bash"}
+
+
+def has_rm_rf(command: str) -> bool:
+    """Detect rm invocations with both recursive and force flags."""
+    # Match rm with optional sudo/doas prefix
+    for match in re.finditer(r"(?:^|[;&|`$()\n])\s*(?:sudo\s+|doas\s+)?rm\s+([^;&|`$()\n]+)", command, re.IGNORECASE):
+        args = match.group(1).split()
+        flags = "".join(arg[1:] for arg in args if arg.startswith("-") and not arg.startswith("--"))
+        long_flags = {arg for arg in args if arg.startswith("--")}
+        has_recursive = "r" in flags or "R" in flags or "--recursive" in long_flags
+        has_force = "f" in flags or "--force" in long_flags
+        if has_recursive and has_force:
+            return True
+    return False
+
+
+def has_sql_keyword_outside_quotes(command: str, keyword: str) -> bool:
+    """Check if SQL keyword appears outside of quoted strings."""
+    # Remove single-quoted strings
+    no_single = re.sub(r"'[^']*'", "", command)
+    # Remove double-quoted strings
+    no_quotes = re.sub(r'"[^"]*"', "", no_single)
+    # Now check for keyword
+    return bool(re.search(rf"\b{keyword}\b", no_quotes, re.IGNORECASE))
+
+
+def has_delete_without_where(command: str) -> bool:
+    """Detect DELETE FROM statements that do not contain WHERE before statement end."""
+    # Remove quoted strings first
+    no_single = re.sub(r"'[^']*'", "", command)
+    no_quotes = re.sub(r'"[^"]*"', "", no_single)
+    
+    for statement in re.split(r";|\n", no_quotes):
+        if re.search(r"\bDELETE\s+FROM\b", statement, re.IGNORECASE) and not re.search(
+            r"\bWHERE\b", statement, re.IGNORECASE
+        ):
+            return True
+    return False
+
+
+def check_command(command: str) -> tuple[bool, str]:
+    """Return (blocked, reason) for a command string."""
+    if has_rm_rf(command):
+        return True, "rm -rf recursive force delete"
+    if has_sql_keyword_outside_quotes(command, "DROP\\s+TABLE"):
+        return True, "DROP TABLE SQL statement"
+    if re.search(r"\bgit\s+push\b[^\n;|&]*\s--force(?:\s|$|=)", command, re.IGNORECASE):
+        return True, "git push --force"
+    if has_sql_keyword_outside_quotes(command, "TRUNCATE"):
+        return True, "TRUNCATE SQL statement"
+    if has_delete_without_where(command):
+        return True, "DELETE FROM without WHERE clause"
+    return False, ""
+
+
+def nested_get(data: dict[str, Any], *paths: tuple[str, ...], default: Any = None) -> Any:
+    for path in paths:
+        cur: Any = data
+        for key in path:
+            if not isinstance(cur, dict) or key not in cur:
+                break
+            cur = cur[key]
+        else:
+            return cur
+    return default
+
+
+def extract_tool_name(data: dict[str, Any]) -> str:
+    return str(
+        nested_get(
+            data,
+            ("tool", "name"),
+            ("tool_name",),
+            ("toolName",),
+            default="",
+        )
+    )
+
+
+def extract_command(data: dict[str, Any]) -> str:
+    return str(
+        nested_get(
+            data,
+            ("tool", "input", "command"),
+            ("tool", "input", "script"),
+            ("tool_input", "command"),
+            ("tool_input", "script"),
+            ("toolInput", "command"),
+            ("toolInput", "script"),
+            ("command",),
+            ("script",),
+            default="",
+        )
+    )
+
+
+def extract_project_path(data: dict[str, Any]) -> str:
+    return str(
+        nested_get(
+            data,
+            ("project_path",),
+            ("projectPath",),
+            ("cwd",),
+            ("tool", "input", "cwd"),
+            ("tool_input", "cwd"),
+            default="unknown",
+        )
+    )
+
+
+def log_blocked(command: str, reason: str, project_path: str) -> None:
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().isoformat()
+    with LOG_FILE.open("a", encoding="utf-8") as fh:
+        fh.write(f"{timestamp} | {project_path} | {reason} | {command}\n")
+
+
+def main() -> int:
+    try:
+        raw = sys.stdin.read().strip()
+        if not raw:
+            return 0
+
+        data = json.loads(raw)
+        tool_name = extract_tool_name(data)
+        command = extract_command(data)
+
+        if tool_name and tool_name not in BASH_TOOL_NAMES:
+            return 0
+        if not command:
+            return 0
+
+        blocked, reason = check_command(command)
+        if not blocked:
+            return 0
+
+        project_path = extract_project_path(data)
+        log_blocked(command, reason, project_path)
+
+        print(
+            json.dumps(
+                {
+                    "error": f"Command blocked: {reason}",
+                    "message": (
+                        f"Claude Code safety hook blocked this Bash command because it matched: {reason}.\n\n"
+                        f"Attempted command:\n{command}\n\n"
+                        "This can destroy files, rewrite remote history, or damage database data. "
+                        "If this action is truly intended, review it manually and run it outside Claude Code.\n\n"
+                        f"Blocked attempt logged to: {LOG_FILE}"
+                    ),
+                }
+            )
+        )
+        return 1
+
+    except Exception as exc:
+        # Fail open so a malformed hook payload does not break normal Claude Code usage.
+        print(json.dumps({"warning": f"destructive-bash-blocker hook error: {exc}"}), file=sys.stderr)
+        return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
