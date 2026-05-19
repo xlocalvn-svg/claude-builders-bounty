@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import re
 import sys
@@ -136,6 +137,24 @@ def review_pr(pr: PullRequest, model: str, api_base: str, api_key: str) -> str:
         print(f"Response text: {response.text[:500]}", file=sys.stderr)
         raise
     
+    if response.text.lstrip().startswith("data:"):
+        chunks = []
+        for line in response.text.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line[5:].strip()
+            if payload == "[DONE]":
+                break
+            try:
+                item = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            delta = item.get("choices", [{}])[0].get("delta", {})
+            if "content" in delta:
+                chunks.append(delta["content"])
+        return "".join(chunks).strip()
+
     try:
         data = response.json()
     except Exception as e:
