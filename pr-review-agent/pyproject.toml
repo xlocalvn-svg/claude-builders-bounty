@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "claude-pr-review-agent"
+version = "0.1.0"
+description = "Claude Code PR review agent with structured Markdown output"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "anthropic>=0.39.0",
+  "requests>=2.31.0",
+]
+
+[project.scripts]
+claude-review = "claude_pr_review_agent.cli:main"
+
+[tool.setuptools]
+packages = ["claude_pr_review_agent"]
