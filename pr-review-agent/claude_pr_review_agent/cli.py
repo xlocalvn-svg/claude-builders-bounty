@@ -6,11 +6,10 @@ from dataclasses import dataclass
 from typing import Optional
 
 import requests
-from anthropic import Anthropic
 
 
 MAX_DIFF_CHARS = 60000
-DEFAULT_MODEL = "claude-3-5-sonnet-latest"
+DEFAULT_MODEL = "claude-3-5-sonnet-20241022"
 
 
 @dataclass
@@ -115,31 +114,39 @@ Diff:
 """
 
 
-def review_pr(pr: PullRequest, model: str) -> str:
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY is required")
-
-    client = Anthropic(api_key=api_key)
-    message = client.messages.create(
-        model=model,
-        max_tokens=1800,
-        temperature=0.2,
-        messages=[{"role": "user", "content": build_prompt(pr)}],
-    )
-    return "\n".join(block.text for block in message.content if getattr(block, "type", None) == "text").strip()
+def review_pr(pr: PullRequest, model: str, api_base: str, api_key: str) -> str:
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": build_prompt(pr)}],
+        "max_tokens": 1800,
+        "temperature": 0.2,
+    }
+    response = requests.post(f"{api_base}/chat/completions", headers=headers, json=payload, timeout=120)
+    response.raise_for_status()
+    data = response.json()
+    return data["choices"][0]["message"]["content"].strip()
 
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Review a GitHub PR with Claude and output structured Markdown.")
     parser.add_argument("--pr", required=True, help="GitHub PR URL, e.g. https://github.com/owner/repo/pull/123")
     parser.add_argument("--model", default=os.getenv("CLAUDE_REVIEW_MODEL", DEFAULT_MODEL))
+    parser.add_argument("--api-base", default=os.getenv("OPENAI_API_BASE", "http://192.168.1.105:20128/v1"))
     parser.add_argument("--output", help="Write review Markdown to this file")
     args = parser.parse_args(argv)
 
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        print("OPENAI_API_KEY is required (9router API key)", file=sys.stderr)
+        return 1
+
     try:
         pr = fetch_pr(args.pr)
-        review = review_pr(pr, args.model)
+        review = review_pr(pr, args.model, args.api_base, api_key)
         if args.output:
             with open(args.output, "w", encoding="utf-8") as fh:
                 fh.write(review + "\n")
